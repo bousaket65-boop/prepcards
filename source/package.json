@@ -1,0 +1,24 @@
+{
+  "name": "prepcards",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.12",
+    "esbuild": "^0.28.2",
+    "jszip": "^3.10.1",
+    "linkedom": "^0.18.15",
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "^3.11.174"
+  },
+  "type": "module"
+}
