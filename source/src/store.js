@@ -63,6 +63,7 @@ function localBackend() {
     mode: 'local',
     get persistent() { return ok; },
     subscribe(onDocs) { listener = onDocs; setTimeout(emit, 0); return () => { listener = null; }; },
+    current: () => new Map(docs),
     async set(id, data) { docs.set(id, JSON.parse(JSON.stringify(data))); persist(); emit(); },
     async del(id) { docs.delete(id); persist(); emit(); },
   };
@@ -155,6 +156,20 @@ export async function openStore(onChange, { offline = false, seed = null } = {})
     },
     async importAll(payload) {
       if (!payload || payload.app !== 'prepcards' || !payload.docs) throw new Error('ไม่ใช่ไฟล์ข้อมูลของแอปนี้');
+      // replace: a curated pack owns every doc whose id starts with one of these prefixes.
+      // Old docs of the pack that the new file no longer has are removed, and progress is carried by card id
+      // so reorganised decks keep what the user already learned.
+      const prefixes = Array.isArray(payload.replace) ? payload.replace.filter(p => typeof p === 'string' && p) : [];
+      const owned = id => prefixes.some(p => id.startsWith(p) || id.startsWith('c_' + p) || id.startsWith('p_' + p));
+      let carried = null;
+      if (prefixes.length) {
+        await api.flushProgress();
+        // the local store's first snapshot arrives on a timer; read it directly so a seed import sees it
+        if (backend.current) docs = backend.current();
+        carried = {};
+        for (const [id, d] of docs) if (d && d.kind === 'progress' && owned(id)) Object.assign(carried, d.c || {});
+        for (const id of [...docs.keys()]) if (owned(id) && !(id in payload.docs)) await backend.del(id);
+      }
       const entries = Object.entries(payload.docs);
       const order = { subject: 0, chunk: 1, deck: 2, progress: 3 };
       entries.sort((a, b) => (order[a[1].kind] ?? 9) - (order[b[1].kind] ?? 9));
@@ -167,6 +182,20 @@ export async function openStore(onChange, { offline = false, seed = null } = {})
         } else {
           await backend.set(id, d);
           if (d.kind === 'deck') decks++;
+        }
+      }
+      if (carried) {
+        for (const [did, d] of entries) {
+          if (!d || d.kind !== 'deck' || !owned(did)) continue;
+          const c = {};
+          for (let i = 0; i < (d.chunks || 1); i++) {
+            const ch = payload.docs[`c_${did}_${i}`];
+            for (const card of (ch && ch.cards) || []) if (carried[card.id]) c[card.id] = carried[card.id];
+          }
+          const own = (payload.docs['p_' + did] || {}).c || {};
+          Object.assign(c, own);
+          if (Object.keys(c).length) await backend.set('p_' + did, { kind: 'progress', deckId: did, c });
+          else if (docs.has('p_' + did)) await backend.del('p_' + did);
         }
       }
       return { decks };

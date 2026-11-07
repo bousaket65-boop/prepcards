@@ -568,7 +568,7 @@ function startQuiz(deckIds, n, onlyIds = null) {
 // ----- mock exam (all subjects) -----
 
 function viewMockSetup() {
-  const subs = S.subjects.map(sb => ({ sb, n: decksOf(sb.id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length })).filter(x => x.n);
+  const subs = S.subjects.map(sb => ({ sb, n: mockDecks(sb.id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length })).filter(x => x.n);
   const total = subs.reduce((a, x) => a + x.n, 0);
   const sel = route.sel || new Set(subs.map(x => x.sb.id));
   route.sel = sel;
@@ -588,9 +588,12 @@ function viewMockSetup() {
   </main>`;
 }
 
+// decks marked out of exam scope are left out of the mock exam
+const mockDecks = sid => decksOf(sid).filter(d => !/นอกขอบเขต/.test(d.name));
+
 function startMock(subjectIds, n, mins) {
   const bySub = subjectIds.map(sid => {
-    const pool = decksOf(sid).flatMap(d => cardsOf(d.id).map(c => ({ ...c, deckId: d.id }))).filter(isQuizzable);
+    const pool = mockDecks(sid).flatMap(d => cardsOf(d.id).map(c => ({ ...c, deckId: d.id }))).filter(isQuizzable);
     return { sid, pool, queue: shuffle(pool) };
   }).filter(x => x.pool.length);
   const picked = [];
@@ -815,7 +818,7 @@ $app.addEventListener('click', async e => {
     case 'mock-sub': { const id = el.dataset.id; if (el.checked) route.sel.add(id); else route.sel.delete(id); route.n = 0; render(); break; }
     case 'mock-n': route.n = +el.dataset.v; render(); break;
     case 'mock-min': route.mins = +el.dataset.v; render(); break;
-    case 'mock-go': { const total = [...route.sel].reduce((a, id) => a + decksOf(id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length, 0); startMock([...route.sel], Math.min(route.n || Math.min(50, total), total), route.mins ?? 30); break; }
+    case 'mock-go': { const total = [...route.sel].reduce((a, id) => a + mockDecks(id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length, 0); startMock([...route.sel], Math.min(route.n || Math.min(50, total), total), route.mins ?? 30); break; }
     case 'weak': go('weak', {}); break;
     case 'weak-flash': { const l = weakCards(); startFlash([...new Set(l.map(c => c.deckId))], false, l.map(c => c.id)); break; }
     case 'weak-quiz': { const l = weakCards().filter(isQuizzable); startQuiz([...new Set(l.map(c => c.deckId))], 0, l.map(c => c.id)); break; }
