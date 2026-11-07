@@ -34,6 +34,8 @@ function pickDistractors(correct, candidates, n = 3) {
   for (const c of candidates) {
     const k = keyOf(c);
     if (!k || seen.has(k)) continue;
+    // skip near-duplicates of the right answer (one contains the other) — they would be "wrong" but actually right
+    if (k.length >= 3 && ck.length >= 3 && (k.includes(ck) || ck.includes(k))) continue;
     seen.add(k);
     const score = Math.abs(c.length - correct.length) + (hasDigit(c) === num ? 0 : 1000) + Math.random() * (correct.length * 0.5 + 10);
     scored.push({ c, score });

@@ -29,6 +29,7 @@ function go(name, params = {}, push = true) {
   window.scrollTo(0, 0);
 }
 function back() {
+  clearInterval(window.__mockTimer);
   route = history.pop() || { name: 'home' };
   session = null;
   render();
@@ -111,6 +112,10 @@ function viewHome() {
       <button class="btn primary big" data-a="import" ${loaded ? '' : 'disabled'}>นำเข้าไฟล์</button>
       <button class="btn ghost" data-a="new-subject" ${loaded ? '' : 'disabled'}>เพิ่มวิชา</button>
     </div>
+    ${S.subjects.length ? `<div class="study">
+      <button class="btn accent big" data-a="mock-setup">สอบจำลอง<small>คละทุกวิชา จับเวลา</small></button>
+      <button class="btn ghost big" data-a="weak">ข้อที่ผิดบ่อย<small>${weakCards().length} ใบ</small></button>
+    </div>` : ''}
     <section class="offline">
       <h2 class="sec">ใช้แบบไม่มีเน็ต</h2>
       <p class="muted small">${MODE === 'artifact'
@@ -473,9 +478,10 @@ async function saveDraft() {
 
 // ----- flashcards -----
 
-function startFlash(deckIds, onlyUnknown) {
+function startFlash(deckIds, onlyUnknown, onlyIds = null) {
   const all = deckIds.flatMap(id => cardsOf(id).map(c => ({ ...c, deckId: id })));
-  const pick = onlyUnknown ? all.filter(c => !(store.progressOf(c.deckId)[c.id] || {}).k) : all;
+  let pick = onlyUnknown ? all.filter(c => !(store.progressOf(c.deckId)[c.id] || {}).k) : all;
+  if (onlyIds) pick = all.filter(c => onlyIds.includes(c.id));
   if (!pick.length) { toast('จำได้ครบทุกใบแล้ว'); return; }
   const byId = new Map(pick.map(c => [c.id, c]));
   session = { kind: 'flash', deckIds, byId, queue: shuffle(pick.map(c => c.id)), total: pick.length, known: 0, again: 0, flipped: false, onlyUnknown };
@@ -559,13 +565,109 @@ function startQuiz(deckIds, n, onlyIds = null) {
   go('quiz', { title: route.title }, route.name !== 'quiz');
 }
 
+// ----- mock exam (all subjects) -----
+
+function viewMockSetup() {
+  const subs = S.subjects.map(sb => ({ sb, n: decksOf(sb.id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length })).filter(x => x.n);
+  const total = subs.reduce((a, x) => a + x.n, 0);
+  const sel = route.sel || new Set(subs.map(x => x.sb.id));
+  route.sel = sel;
+  const n = route.n || Math.min(50, total);
+  const mins = route.mins ?? 30;
+  const chosenTotal = subs.filter(x => sel.has(x.sb.id)).reduce((a, x) => a + x.n, 0);
+  return `${topbar('สอบจำลอง', { sub: 'สุ่มข้อสอบคละวิชา' })}
+  <main>
+    <h2 class="sec">วิชาที่สอบ</h2>
+    <div class="checks">${subs.map(x => `<label class="check"><input type="checkbox" data-a="mock-sub" data-id="${x.sb.id}" ${sel.has(x.sb.id) ? 'checked' : ''}><span>${esc(x.sb.name)}</span><small>${x.n} ข้อ</small></label>`).join('')}</div>
+    <h2 class="sec">จำนวนข้อ</h2>
+    <div class="seg small">${[20, 50, 100].filter(v => v < chosenTotal).concat([chosenTotal]).map(v => `<button class="${v === Math.min(n, chosenTotal) ? 'on' : ''}" data-a="mock-n" data-v="${v}">${v === chosenTotal ? 'ทั้งหมด ' + v : v}</button>`).join('')}</div>
+    <h2 class="sec">เวลา</h2>
+    <div class="seg small">${[0, 15, 30, 60].map(v => `<button class="${v === mins ? 'on' : ''}" data-a="mock-min" data-v="${v}">${v ? v + ' นาที' : 'ไม่จับเวลา'}</button>`).join('')}</div>
+    <div class="stack"><button class="btn primary big" data-a="mock-go" ${chosenTotal ? '' : 'disabled'}>เริ่มสอบ</button></div>
+    <p class="muted small">แต่ละวิชาได้จำนวนข้อใกล้เคียงกัน ระหว่างสอบจะไม่เฉลยทันที เหมือนสอบจริง เฉลยและคะแนนแยกรายวิชาจะแสดงตอนจบ</p>
+  </main>`;
+}
+
+function startMock(subjectIds, n, mins) {
+  const bySub = subjectIds.map(sid => {
+    const pool = decksOf(sid).flatMap(d => cardsOf(d.id).map(c => ({ ...c, deckId: d.id }))).filter(isQuizzable);
+    return { sid, pool, queue: shuffle(pool) };
+  }).filter(x => x.pool.length);
+  const picked = [];
+  // round-robin so every subject gets a fair share
+  while (picked.length < n && bySub.some(x => x.queue.length)) {
+    for (const x of bySub) { if (picked.length >= n) break; const c = x.queue.pop(); if (c) picked.push({ c, x }); }
+  }
+  const subName = id => (subjectById(id) || {}).name || '';
+  const questions = shuffle(picked).map(({ c, x }) => ({ ...buildQuestion(c, x.pool), deckId: c.deckId, card: c, subject: subName(x.sid) }));
+  clearInterval(window.__mockTimer);
+  session = { kind: 'quiz', mock: { subjectIds, n, mins, deadline: mins ? Date.now() + mins * 60000 : 0 }, deckIds: subjectIds.flatMap(id => decksOf(id).map(d => d.id)), questions, i: 0, chosen: null, right: 0, wrong: [], answers: [] };
+  if (mins) window.__mockTimer = setInterval(tickMock, 1000);
+  go('quiz', { title: 'สอบจำลอง' }, route.name !== 'quiz');
+}
+
+function fmtLeft(ms) {
+  const t = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+function tickMock() {
+  const s = session;
+  if (!s || !s.mock || !s.mock.deadline || route.name !== 'quiz') { clearInterval(window.__mockTimer); return; }
+  const left = s.mock.deadline - Date.now();
+  const el = document.getElementById('mock-timer');
+  if (el) { el.textContent = 'เหลือเวลา ' + fmtLeft(left); el.classList.toggle('late', left < 60000); }
+  if (left <= 0) { clearInterval(window.__mockTimer); s.timedOut = true; s.i = s.questions.length; store.flushProgress(); render(); }
+}
+
+function weakCards() {
+  const out = [];
+  for (const d of S.decks) {
+    const p = store ? store.progressOf(d.id) : {};
+    for (const c of cardsOf(d.id)) {
+      const e = p[c.id];
+      if (e && e.w > 0 && (e.w > (e.r || 0) || !e.k)) out.push({ ...c, deckId: d.id, w: e.w, r: e.r || 0 });
+    }
+  }
+  return out.sort((a, b) => (b.w - b.r) - (a.w - a.r) || b.w - a.w);
+}
+
+function viewWeak() {
+  const list = weakCards();
+  const quizN = list.filter(isQuizzable).length;
+  const deckName = id => (deckById(id) || {}).name || '';
+  return `${topbar('ข้อที่ผิดบ่อย', { sub: `${list.length} ใบ จากประวัติการตอบ` })}
+  <main>
+    ${list.length ? `<div class="study">
+      <button class="btn primary big" data-a="weak-flash">ทบทวนแฟลชการ์ด<small>${list.length} ใบ</small></button>
+      <button class="btn accent big" data-a="weak-quiz" ${quizN ? '' : 'disabled'}>ทำข้อสอบ<small>${quizN} ข้อ</small></button>
+    </div>
+    <ol class="cardlist" style="margin-top:16px">${list.slice(0, 80).map(c => `<li><span class="kind">${esc(deckName(c.deckId))}: ผิด ${c.w} ครั้ง ถูก ${c.r} ครั้ง</span><b>${nl(c.front)}</b><span>${nl(c.back)}</span></li>`).join('')}</ol>`
+    : '<div class="empty"><p>ยังไม่มีข้อที่ผิด</p><p class="muted">ทำข้อสอบหรือทบทวนแฟลชการ์ดก่อน ข้อที่ตอบผิดหรือกด "ยังไม่ได้" จะมารวมไว้ที่นี่</p></div>'}
+  </main>`;
+}
+
+function mockBreakdown(s) {
+  const by = new Map();
+  for (const a of s.answers) {
+    const e = by.get(a.subject) || { right: 0, total: 0 };
+    e.total++; if (a.ok) e.right++;
+    by.set(a.subject, e);
+  }
+  for (const q of s.questions.slice(s.answers.length)) { const e = by.get(q.subject) || { right: 0, total: 0 }; e.total++; by.set(q.subject, e); }
+  const rows = [...by.entries()].map(([name, e]) => ({ name, ...e, pct: e.total ? Math.round(e.right / e.total * 100) : 0 })).sort((a, b) => a.pct - b.pct);
+  return `<h2 class="sec">คะแนนรายวิชา (อ่อนสุดอยู่บน)</h2><div class="bars">${rows.map(r => `<div class="barrow"><span class="bname">${esc(r.name)}</span><span class="bval">${r.right}/${r.total} (${r.pct}%)</span><div class="meter ${r.pct < 60 ? 'low' : ''}"><span style="width:${r.pct}%"></span></div></div>`).join('')}</div>`;
+}
+
 function viewQuiz() {
   const s = session;
   if (s.i >= s.questions.length) {
+    clearInterval(window.__mockTimer);
     const n = s.questions.length;
     const pct = n ? Math.round(s.right / n * 100) : 0;
-    return `${topbar('ผลการทำข้อสอบ')}<main class="done">
-      <p class="bignum">${s.right}<span>/${n}</span></p><p>ถูก ${pct}%</p>
+    return `${topbar(s.mock ? 'ผลสอบจำลอง' : 'ผลการทำข้อสอบ')}<main class="done">
+      <p class="bignum">${s.right}<span>/${n}</span></p><p>ถูก ${pct}%${s.timedOut ? ' (หมดเวลา ข้อที่ไม่ได้ทำนับเป็นผิด)' : ''}</p>
+      ${s.mock ? mockBreakdown(s) : ''}
       ${s.wrong.length ? `<h2 class="sec">ข้อที่ตอบผิด</h2><ol class="cardlist">${s.wrong.map(q => `<li><b>${nl(q.prompt)}</b><span>คำตอบ: ${esc(q.options[q.answer])}</span><span class="muted">คุณตอบ: ${esc(q.options[q.picked])}</span></li>`).join('')}</ol>` : '<p>ถูกทุกข้อ</p>'}
       <div class="stack">
         ${s.wrong.length ? `<button class="btn primary" data-a="quiz-wrong">ทำเฉพาะข้อที่ผิด (${s.wrong.length})</button>` : ''}
@@ -575,10 +677,13 @@ function viewQuiz() {
   }
   const q = s.questions[s.i];
   const answered = s.chosen !== null;
-  return `${topbar('ทำข้อสอบ', { sub: `ข้อ ${s.i + 1} จาก ${s.questions.length} ถูก ${s.right}` })}
+  const sub = s.mock ? `ข้อ ${s.i + 1} จาก ${s.questions.length}` : `ข้อ ${s.i + 1} จาก ${s.questions.length} ถูก ${s.right}`;
+  return `${topbar(s.mock ? 'สอบจำลอง' : 'ทำข้อสอบ', { sub })}
   <main class="quiz">
+    ${s.mock && s.mock.deadline ? `<p class="timer" id="mock-timer">เหลือเวลา ${fmtLeft(s.mock.deadline - Date.now())}</p>` : ''}
+    ${s.mock ? `<button class="btn ghost small-btn" data-a="mock-end">ส่งข้อสอบตอนนี้</button>` : ''}
     <div class="meter thin"><span style="width:${Math.round(s.i / s.questions.length * 100)}%"></span></div>
-    <div class="qcard">${q.context ? `<span class="kind">${esc(q.context)}</span>` : ''}<p class="q">${nl(q.prompt)}</p></div>
+    <div class="qcard">${q.subject ? `<span class="kind">${esc(q.subject)}</span>` : ''}${q.context ? `<span class="kind">${esc(q.context)}</span>` : ''}<p class="q">${nl(q.prompt)}</p></div>
     <ol class="choices">${q.options.map((o, k) => {
       let cls = '';
       if (answered) { if (k === q.answer) cls = 'right'; else if (k === s.chosen) cls = 'wrong'; else cls = 'dim'; }
@@ -593,15 +698,18 @@ function choose(k) {
   if (!s || s.chosen !== null) return;
   const q = s.questions[s.i];
   s.chosen = k;
-  if (k === q.answer) { s.right++; store.markCard(q.deckId, q.cardId, { right: true }); }
+  const ok = k === q.answer;
+  if (ok) { s.right++; store.markCard(q.deckId, q.cardId, { right: true }); }
   else { s.wrong.push({ ...q, picked: k }); store.markCard(q.deckId, q.cardId, { wrong: true, known: false }); }
+  if (s.answers) s.answers.push({ subject: q.subject, ok });
+  if (s.mock) { s.i++; s.chosen = null; if (s.i >= s.questions.length) store.flushProgress(); render(); window.scrollTo(0, 0); return; }
   render();
 }
 
 // ---------- render & events ----------
 
 function render() {
-  const views = { home: viewHome, subject: viewSubject, deck: viewDeck, import: viewImport, review: viewReview, flashSetup: viewFlashSetup, flash: viewFlash, quizSetup: viewQuizSetup, quiz: viewQuiz };
+  const views = { home: viewHome, subject: viewSubject, deck: viewDeck, import: viewImport, review: viewReview, flashSetup: viewFlashSetup, flash: viewFlash, quizSetup: viewQuizSetup, quiz: viewQuiz, mockSetup: viewMockSetup, weak: viewWeak };
   if ((route.name === 'flash' || route.name === 'quiz') && !session) route = { name: 'home' };
   $app.innerHTML = (views[route.name] || viewHome)();
   if (route.name === 'import') bindImport();
@@ -701,7 +809,16 @@ $app.addEventListener('click', async e => {
     case 'choose': choose(+el.dataset.k); break;
     case 'quiz-next': session.i++; session.chosen = null; render(); window.scrollTo(0, 0); if (session.i >= session.questions.length) store.flushProgress(); break;
     case 'quiz-wrong': { const s = session; startQuiz(s.deckIds, 0, s.wrong.map(q => q.cardId)); break; }
-    case 'quiz-new': { const s = session; startQuiz(s.deckIds, s.questions.length); break; }
+    case 'quiz-new': { const s = session; if (s.mock) startMock(s.mock.subjectIds, s.mock.n, s.mock.mins); else startQuiz(s.deckIds, s.questions.length); break; }
+    case 'mock-setup': go('mockSetup', {}); break;
+    case 'mock-end': if (await dialog({ title: 'ส่งข้อสอบตอนนี้', body: 'ข้อที่ยังไม่ได้ทำจะนับเป็นผิด', confirm: 'ส่งข้อสอบ' })) { clearInterval(window.__mockTimer); session.i = session.questions.length; store.flushProgress(); render(); } break;
+    case 'mock-sub': { const id = el.dataset.id; if (el.checked) route.sel.add(id); else route.sel.delete(id); route.n = 0; render(); break; }
+    case 'mock-n': route.n = +el.dataset.v; render(); break;
+    case 'mock-min': route.mins = +el.dataset.v; render(); break;
+    case 'mock-go': { const total = [...route.sel].reduce((a, id) => a + decksOf(id).flatMap(d => cardsOf(d.id)).filter(isQuizzable).length, 0); startMock([...route.sel], Math.min(route.n || Math.min(50, total), total), route.mins ?? 30); break; }
+    case 'weak': go('weak', {}); break;
+    case 'weak-flash': { const l = weakCards(); startFlash([...new Set(l.map(c => c.deckId))], false, l.map(c => c.id)); break; }
+    case 'weak-quiz': { const l = weakCards().filter(isQuizzable); startQuiz([...new Set(l.map(c => c.deckId))], 0, l.map(c => c.id)); break; }
   }
 });
 
